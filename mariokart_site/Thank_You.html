@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+	<meta content="text/html; charset=utf-8" http-equiv="Content-Type" />
+	<meta name="viewport" content="initial-scale=1, width=device-width" />
+	<title>Thank You</title>
+	<link href="styles_folder/styles.css" rel="stylesheet" type="text/css" />
+	<link href="styles_folder/screen.css" rel="stylesheet" type="text/css" media="screen" />
+	<link href="styles_folder/print.css" rel="stylesheet" type="text/css" media="print" />
+
+	<script src="https://code.jquery.com/jquery-3.6.1.min.js"
+		integrity="sha256-o88AwQnZB+VDvE9tvIXrMQaPlFFSUTR+nldQm1LuPXQ=" crossorigin="anonymous"></script>
+	<script>
+		$(function () { $('#header').load('multi_page/header.html'); })
+		$(function () { $('#footer').load('multi_page/footer.html'); })
+		$(function () { $('#rightcolumn').load('multi_page/rightcolumn.html'); })
+	</script>
+</head>
+
+<body>
+	<div id="container">
+		<!-- Header Tag, See header.html to change -->
+		<div id="header"></div>
+		<div id="maincontent">
+			<!-- Left Column  -->
+			<div id="leftcolumn">
+				<div class="lgpad">
+
+					<h1>
+						We got your feedback</h1>
+					<p>
+						&nbsp;Thanks for submitting your feedback or question.
+					</p>
+					<p>
+						We will be replying soon.</p>
+					<p>
+						&nbsp;</p>
+				</div>
+			</div>
+			<!-- Right Column, to change, see rightcolumn.html-->
+			<div id="rightcolumn"></div>
+			<div class="clearfloat"></div>
+		</div>
+		<!-- Footer Tag, See footer.html to change -->
+		<div id="footer"></div>
+	</div>
+</body>
+
+</html>
