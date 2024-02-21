@@ -6,7 +6,7 @@ st.sidebar.markdown("# Kart Configurations 🏎️")
 
 st.write("What Kart Configuration is Best?")
 
-df_kart = pd.read_csv('data/kart_stats.csv')
+df_kart = pd.read_csv('streamlit_template/data/kart_stats.csv')
 
 st.title('Kart Stats Dashboard')
 st.header('Kart Statistics Overview')

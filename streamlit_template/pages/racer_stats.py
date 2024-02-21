@@ -5,7 +5,7 @@ st.sidebar.markdown("# Racer Page 🎈")
 
 st.write(' # Mariokart *Stats Website*')
 
-df_racer = pd.read_csv('data/racer_stats.csv')
+df_racer = pd.read_csv('streamlit_template/data/racer_stats.csv')
 
 # st.write(df_racer)
 
@@ -67,7 +67,7 @@ with right_column_2:
     st.write(description)
 
 with left_column_2:
-    st.image(f"images/{chosen}.png", width=200)
+    st.image(f"streamlit_template/images/{chosen}.png", width=200)
 
 df_single_racer = df_racer.loc[df_racer['Character'] == chosen].drop(columns=['Character','Times First Place','Total Races'])
 st.write(df_single_racer)
