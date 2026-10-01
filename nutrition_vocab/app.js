@@ -6,7 +6,7 @@ const GROUPS = []; // {key, cat, catName, name, words:[]}
 VOCAB.forEach(cat => {
   cat.groups.forEach((g, gi) => {
     const key = `${cat.id}:${gi}`;
-    const grp = { key, cat: cat.id, catName: cat.name, name: g.name, words: [] };
+    const grp = { key, cat: cat.id, catName: cat.name, name: g.name, tip: g.tip || '', words: [] };
     g.words.forEach(([en, ipa, zh, ex, exZh]) => {
       const w = { id: en.toLowerCase(), en, ipa, zh, ex, exZh, cat: cat.id, catName: cat.name, group: g.name, gkey: key };
       WORDS.push(w);
@@ -23,6 +23,7 @@ const STORE_KEY = 'nutrition_vocab_v1';
 const DAY = 86400000;
 const INTERVAL_DAYS = [0, 1, 2, 4, 7, 15, 30]; // 记忆盒子对应的复习间隔
 const MASTER_BOX = 4;
+const DATA_VERSION = 2; // 词库分组变化时递增，用于重置旧的学习范围
 
 function defaultState() {
   return {
@@ -30,7 +31,9 @@ function defaultState() {
     words: {},
     history: [],
     daily: {},
-    settings: { rate: 0.9, accent: 'en-US', enVoice: '', zhVoice: '', autoSpeak: true, learnOrder: 'smart' },
+    version: DATA_VERSION,
+    settings: { rate: 0.9, accent: 'en-US', enVoice: '', zhVoice: '', autoSpeak: true, learnOrder: 'smart', useClips: true, clipRate: 1 },
+    playlist: { mode: 'learn', source: 'smart', count: 30, example: true, exampleZh: true, think: 3000, repeat: 1 },
     voice: { mode: 'listen', repeat: 1, spell: false, example: true, exampleZh: true, count: 20, source: 'smart', think: 5 },
     quiz: { count: 20, types: ['en2zh', 'zh2en', 'listen', 'spell', 'blank'], source: 'all' },
   };
@@ -45,7 +48,9 @@ function loadState() {
       settings: { ...d.settings, ...raw.settings },
       voice: { ...d.voice, ...raw.voice },
       quiz: { ...d.quiz, ...raw.quiz },
-      scope: (raw.scope || d.scope).filter(k => GROUP_BY_KEY[k]),
+      playlist: { ...d.playlist, ...raw.playlist },
+      scope: raw.version === DATA_VERSION ? (raw.scope || d.scope).filter(k => GROUP_BY_KEY[k]) : d.scope,
+      version: DATA_VERSION,
     };
   } catch (e) {
     return d;
@@ -53,6 +58,7 @@ function loadState() {
 }
 let S = loadState();
 if (!S.scope.length) S.scope = defaultState().scope;
+S.settings.accent = 'en-US'; // 统一使用美式发音
 function save() {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); } catch (e) { toast('保存失败：存储空间不足'); }
 }
@@ -92,7 +98,7 @@ const similarity = (a, b) => 1 - levenshtein(a, b) / Math.max(a.length, b.length
 function wordRegex(en) {
   let base = en.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   if (/y$/i.test(en)) base = base.slice(0, -1) + '(?:y|ies)';
-  return new RegExp('\\b' + base + '(?:s|es|ed|ing|d)?\\b', 'i');
+  return new RegExp('(?<![A-Za-z])' + base + '(?:s|es|ed|ing|d)?(?![A-Za-z])', 'i');
 }
 function highlight(sentence, en) {
   const re = wordRegex(en);
@@ -202,10 +208,14 @@ function loadVoices() { if (hasTTS) voices = speechSynthesis.getVoices(); }
 if (hasTTS) { loadVoices(); speechSynthesis.onvoiceschanged = loadVoices; }
 const EN = () => S.settings.accent;
 const ZH = 'zh-CN';
+// 美式英语中音质较好的系统语音（按优先级）
+const GOOD_US_VOICES = ['Samantha', 'Ava', 'Allison', 'Susan', 'Zoe', 'Nicky', 'Google US English', 'Microsoft Aria', 'Microsoft Jenny', 'Microsoft Guy'];
 function pickVoice(lang) {
   const pref = lang.startsWith('en') ? S.settings.enVoice : S.settings.zhVoice;
   const norm = v => v.lang.replace('_', '-');
+  const good = lang === 'en-US' && GOOD_US_VOICES.map(n => voices.find(v => norm(v) === 'en-US' && v.name.includes(n))).find(Boolean);
   return voices.find(v => v.voiceURI === pref && norm(v).slice(0, 2) === lang.slice(0, 2)) ||
+    good ||
     voices.find(v => norm(v) === lang && v.localService) ||
     voices.find(v => norm(v) === lang) ||
     voices.find(v => norm(v).startsWith(lang.slice(0, 2)));
@@ -234,6 +244,40 @@ function speakNow(text, lang, rateMul) {
   return speak(text, lang, rateMul);
 }
 const spellOut = en => en.toUpperCase().replace(/[^A-Z0-9]/g, ' ').split('').filter(c => c !== ' ').join(', ');
+
+/* ================= 预生成录音（美式英语 + 普通话） ================= */
+// 每个词有 4 段录音：en 单词、zh 释义、ex 例句、exzh 例句翻译。
+// 文件为 24kHz 单声道 32kbps CBR MP3（每帧 96 字节 = 24 毫秒），可直接按字节拼接。
+const AUDIO_BASE = 'audio/';
+const FRAME_BYTES = 96, FRAME_SEC = 0.024;
+const slugOf = en => en.toLowerCase().replace(/'/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+const clipUrl = (kind, w) => `${AUDIO_BASE}${kind}/${slugOf(w.en)}.mp3`;
+const silUrl = ms => `${AUDIO_BASE}sil/${ms}.mp3`;
+const clipText = (kind, w) => ({ en: w.en, zh: w.zh, ex: w.ex, exzh: w.exZh })[kind];
+const clipLang = kind => (kind === 'en' || kind === 'ex') ? EN() : ZH;
+const clipPlayer = new Audio();
+clipPlayer.preload = 'auto';
+let clipToken = 0;
+function stopClip() { clipToken++; try { clipPlayer.pause(); } catch (e) { /* 忽略 */ } }
+function playClip(url, rate = 1) {
+  const token = ++clipToken;
+  return new Promise((resolve, reject) => {
+    const done = ok => { clipPlayer.onended = clipPlayer.onerror = clipPlayer.onpause = null; ok ? resolve() : reject(new Error('clip')); };
+    clipPlayer.onended = () => done(true);
+    clipPlayer.onerror = () => done(false);
+    clipPlayer.onpause = () => { if (token !== clipToken) done(true); };
+    clipPlayer.src = url;
+    clipPlayer.playbackRate = rate;
+    clipPlayer.play().catch(() => done(false));
+  });
+}
+// 播放某个词的录音；录音不可用时退回系统语音
+function sayClip(w, kind, rateMul = 1) {
+  if (hasTTS) speechSynthesis.cancel();
+  if (!plAudio.paused) plAudio.pause();
+  if (!S.settings.useClips) { stopClip(); return speak(clipText(kind, w), clipLang(kind), rateMul); }
+  return playClip(clipUrl(kind, w), S.settings.clipRate * rateMul).catch(() => speak(clipText(kind, w), clipLang(kind), rateMul));
+}
 
 /* ================= 语音识别 ================= */
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -305,7 +349,7 @@ function switchTab(tab) {
   window.scrollTo(0, 0);
 }
 function render() {
-  ({ learn: renderLearn, voice: renderVoice, quiz: renderQuiz, stats: renderStats })[currentTab]();
+  ({ learn: renderLearn, play: renderPlay, voice: renderVoice, quiz: renderQuiz, stats: renderStats })[currentTab]();
 }
 function scopeBar() {
   return `<div class="scope-bar"><span class="label">📚 ${esc(scopeLabel())}</span><button class="chip" data-act="scope">选择范围</button></div>`;
@@ -317,11 +361,11 @@ document.addEventListener('click', e => {
   if (sp) {
     const w = WORD_BY_ID[sp.dataset.id];
     const kind = sp.dataset.say;
-    if (kind === 'word') speakNow(w.en, EN());
-    if (kind === 'slow') speakNow(w.en, EN(), 0.6);
-    if (kind === 'zh') speakNow(w.zh, ZH);
-    if (kind === 'ex') speakNow(w.ex, EN());
-    if (kind === 'exzh') speakNow(w.exZh, ZH);
+    if (kind === 'word') sayClip(w, 'en');
+    if (kind === 'slow') sayClip(w, 'en', 0.7);
+    if (kind === 'zh') sayClip(w, 'zh');
+    if (kind === 'ex') sayClip(w, 'ex');
+    if (kind === 'exzh') sayClip(w, 'exzh');
   }
   const wd = e.target.closest('[data-word]');
   if (wd && !sp) openWord(WORD_BY_ID[wd.dataset.word]);
@@ -337,18 +381,21 @@ $('#modal').addEventListener('click', e => { if (e.target.id === 'modal' || e.ta
 
 function openScope() {
   const sel = new Set(S.scope);
+  const open = new Set();
   const draw = () => {
     openModal(`<h2>选择学习范围</h2>
-      <p class="muted small">点板块名可整体选择 / 取消，也可以只选其中的主题。</p>
+      <p class="muted small">点“全选”整体选择 / 取消一个板块；点板块名展开，可以只选其中的主题（同类词按主题放在一起）。</p>
       ${VOCAB.map(c => {
         const gs = GROUPS.filter(g => g.cat === c.id);
         const all = gs.every(g => sel.has(g.key));
         const cnt = gs.reduce((s, g) => s + g.words.length, 0);
+        const nSel = gs.filter(g => sel.has(g.key)).length;
+        const isOpen = open.has(c.id);
         return `<div class="cat-block">
-          <div class="cat-head"><span>${c.icon} ${esc(c.name)} <span class="muted small">${cnt}词</span></span>
+          <div class="cat-head"><button class="cat-toggle" data-open="${c.id}">${isOpen ? '▾' : '▸'} ${c.icon} ${esc(c.name)} <span class="muted small">${cnt}词 · 已选 ${nSel}/${gs.length} 个主题</span></button>
             <button class="chip ${all ? 'on' : ''}" data-cat="${c.id}">${all ? '✓ 全选' : '全选'}</button></div>
-          <div class="muted small">${esc(c.desc)}</div>
-          <div class="groups">${gs.map(g => `<button class="chip ${sel.has(g.key) ? 'on' : ''}" data-g="${g.key}">${esc(g.name)} ${g.words.length}</button>`).join('')}</div>
+          ${isOpen ? `<div class="muted small">${esc(c.desc)}</div>
+          <div class="groups">${gs.map(g => `<button class="chip ${sel.has(g.key) ? 'on' : ''}" data-g="${g.key}">${esc(g.name)} ${g.words.length}</button>`).join('')}</div>` : ''}
         </div>`;
       }).join('')}
       <div class="row" style="margin-top:12px">
@@ -357,6 +404,7 @@ function openScope() {
         <button class="btn grow" id="scOk">确定（${GROUPS.filter(g => sel.has(g.key)).reduce((s, g) => s + g.words.length, 0)}词）</button>
       </div>`);
     const card = $('#modalCard');
+    card.querySelectorAll('[data-open]').forEach(b => b.onclick = () => { const id = b.dataset.open; open.has(id) ? open.delete(id) : open.add(id); draw(); });
     card.querySelectorAll('[data-g]').forEach(b => b.onclick = () => { sel.has(b.dataset.g) ? sel.delete(b.dataset.g) : sel.add(b.dataset.g); draw(); });
     card.querySelectorAll('[data-cat]').forEach(b => b.onclick = () => {
       const gs = GROUPS.filter(g => g.cat === b.dataset.cat);
@@ -401,9 +449,19 @@ function wordCardHtml(w, { hideZh = false } = {}) {
               <button class="speak-btn" data-say="ex" data-id="${esc(w.id)}">🔊 读例句</button>
               <button class="speak-btn" data-say="exzh" data-id="${esc(w.id)}">🔊 中文</button>
             </div>
-          </div>`}
+          </div>
+          ${groupHintHtml(w)}`}
     </div>
   </div>`;
+}
+// 同组记忆提示 + 同组词（把相近的词放在一起记）
+function groupHintHtml(w) {
+  const g = GROUP_BY_KEY[w.gkey];
+  const sibs = g.words.filter(x => x.id !== w.id);
+  return `<div class="group-hint">
+      ${g.tip ? `<div class="tip">💡 ${esc(g.tip)}</div>` : ''}
+      ${sibs.length ? `<div class="sibs"><span class="muted small">同组词：</span>${sibs.map(x => `<button class="chip sib ${status(x)}" data-word="${esc(x.id)}">${esc(x.en)}</button>`).join('')}</div>` : ''}
+    </div>`;
 }
 function openWord(w) {
   const r = prog(w);
@@ -445,10 +503,18 @@ function renderLearn() {
     const draw = q => {
       q = (q || '').trim().toLowerCase();
       const list = words.filter(w => !q || w.en.toLowerCase().includes(q) || w.zh.includes(q));
-      $('#wlist').innerHTML = list.map(w => `<li data-word="${esc(w.id)}">
+      // 按主题分组显示，同类词放在一起
+      const byGroup = new Map();
+      list.forEach(w => { if (!byGroup.has(w.gkey)) byGroup.set(w.gkey, []); byGroup.get(w.gkey).push(w); });
+      $('#wlist').innerHTML = [...byGroup].map(([k, ws]) => {
+        const g = GROUP_BY_KEY[k];
+        return `<li class="group-head"><div><b>${esc(g.name)}</b> <span class="muted small">${esc(g.catName)} · ${ws.length}词</span>
+            ${g.tip && !q ? `<div class="muted small">💡 ${esc(g.tip)}</div>` : ''}</div></li>`
+          + ws.map(w => `<li data-word="${esc(w.id)}">
           <span class="dot ${status(w)}"></span>
           <div class="grow"><div class="w">${esc(w.en)} <span class="muted small">${esc(w.ipa)}</span></div><div class="m">${esc(w.zh)}</div></div>
-          <button class="speak-btn" data-say="word" data-id="${esc(w.id)}">🔊</button></li>`).join('') || '<li class="muted">没有找到</li>';
+          <button class="speak-btn" data-say="word" data-id="${esc(w.id)}">🔊</button></li>`).join('');
+      }).join('') || '<li class="muted">没有找到</li>';
     };
     draw('');
     $('#search').addEventListener('input', e => draw(e.target.value));
@@ -489,7 +555,7 @@ function renderLearn() {
       $('#prev').onclick = () => { s.i = Math.max(0, s.i - 1); s.revealed = false; s.graded = false; render(); };
       if (S.settings.autoSpeak && !s.spoken?.has(s.i)) {
         (s.spoken = s.spoken || new Set()).add(s.i);
-        speakNow(w.en, EN());
+        sayClip(w, 'en');
       }
     }
   }
@@ -569,6 +635,7 @@ function startVoice() {
   const list = pickVoiceWords();
   if (!list.length) return toast(S.voice.source === 'wrong' ? '错题本是空的 👍' : '没有可学习的单词');
   // iOS 需要在点击事件中同步“解锁”语音和音频
+  if (!plAudio.paused) plAudio.pause();
   speechSynthesis.cancel();
   const unlock = new SpeechSynthesisUtterance(' ');
   unlock.volume = 0;
@@ -677,24 +744,39 @@ async function askAndCheck(w, lang, matcher) {
   return null;
 }
 
+// 语音问答中播放录音（可被暂停/跳过打断），失败时退回系统语音
+async function sayW(w, kind, rateMul = 1) {
+  check();
+  if (S.settings.useClips) {
+    let ok = true;
+    const cancel = () => stopClip();
+    VS.cancelers.add(cancel);
+    try { await playClip(clipUrl(kind, w), S.settings.clipRate * rateMul); } catch (e) { ok = false; }
+    VS.cancelers.delete(cancel);
+    check();
+    if (ok) return;
+  }
+  await say(clipText(kind, w), clipLang(kind), rateMul);
+}
+
 async function runVoiceWord(w) {
   const v = S.voice;
   const mode = VS.mode;
   const example = async () => {
     if (!v.example) return;
     setState('📖 例句');
-    await say(w.ex, EN());
-    if (v.exampleZh) await say(w.exZh, ZH);
+    await sayW(w, 'ex');
+    if (v.exampleZh) await sayW(w, 'exzh');
   };
 
   if (mode === 'listen') {
     for (let r = 0; r < v.repeat; r++) {
       setState('🔊 单词');
-      await say(w.en, EN());
+      await sayW(w, 'en');
       await sleep(300);
-      if (v.spell) { setState('🔤 拼写'); await say(spellOut(w.en), EN(), 0.85); await sleep(200); await say(w.en, EN()); }
+      if (v.spell) { setState('🔤 拼写'); await say(spellOut(w.en), EN(), 0.85); await sleep(200); await sayW(w, 'en'); }
       setState('🀄 释义');
-      await say(w.zh, ZH);
+      await sayW(w, 'zh');
       await example();
       await sleep(700);
     }
@@ -704,16 +786,16 @@ async function runVoiceWord(w) {
 
   if (mode === 'repeat') {
     setState('🔊 示范');
-    await say(w.en, EN());
-    await say(w.zh, ZH);
+    await sayW(w, 'en');
+    await sayW(w, 'zh');
     if (!hasSR || VS.micDenied) {
-      await say(w.en, EN(), 0.8);
+      await sayW(w, 'en', 0.8);
       setState('🗣️ 请跟读');
       await sleep(3000);
     } else {
       let ok = false;
       for (let attempt = 0; attempt < 2 && !ok; attempt++) {
-        if (attempt) { await say('再试一次', ZH); await say(w.en, EN(), 0.65); }
+        if (attempt) { await say('再试一次', ZH); await sayW(w, 'en', 0.75); }
         await beep();
         const heard = await hear(EN(), 6000);
         if (!heard.length) { VS.silent++; break; }
@@ -724,7 +806,7 @@ async function runVoiceWord(w) {
       }
       VS.asked++;
       if (ok) { VS.correct++; await say('很好！', ZH); }
-      else { VS.wrong.push(w.id); await say('没关系，再听一遍', ZH); await say(w.en, EN(), 0.6); }
+      else { VS.wrong.push(w.id); await say('没关系，再听一遍', ZH); await sayW(w, 'en', 0.75); }
     }
     await example();
     markSeen(w);
@@ -735,8 +817,8 @@ async function runVoiceWord(w) {
   // 问答模式
   const en2zh = mode === 'en2zh';
   setState(en2zh ? '🔊 这个单词是什么意思？' : '🔊 这个用英文怎么说？');
-  if (en2zh) { await say(w.en, EN()); await sleep(400); await say(w.en, EN()); }
-  else { await say(w.zh, ZH); }
+  if (en2zh) { await sayW(w, 'en'); await sleep(400); await sayW(w, 'en'); }
+  else { await sayW(w, 'zh'); }
   let result = null;
   if (hasSR && !VS.micDenied) {
     result = await askAndCheck(w, en2zh ? ZH : EN(), heard => en2zh ? matchZh(heard, w.zh) : matchEn(heard, w.en));
@@ -750,15 +832,15 @@ async function runVoiceWord(w) {
     setState('✅ 正确');
     await beep(1200, 100);
     await say('正确！', ZH);
-    if (en2zh) await say(w.zh, ZH); else { await say(w.en, EN()); }
+    if (en2zh) await sayW(w, 'zh'); else { await sayW(w, 'en'); }
   } else {
     if (result === false) { VS.asked++; VS.wrong.push(w.id); setState('❌ 答案是'); await beep(300, 220); await say('不对哦，答案是', ZH); }
     else { setState('💡 答案是'); if (hasSR && !VS.micDenied) VS.silent++; await say('答案是', ZH); }
-    if (en2zh) await say(w.zh, ZH);
+    if (en2zh) await sayW(w, 'zh');
     else {
-      await say(w.en, EN());
+      await sayW(w, 'en');
       if (v.spell) await say(spellOut(w.en), EN(), 0.85);
-      await say(w.en, EN(), 0.75);
+      await sayW(w, 'en', 0.8);
     }
   }
   if (result !== null) grade(w, result); else markSeen(w);
@@ -876,6 +958,302 @@ document.addEventListener('visibilitychange', () => {
   if (VS && VS.running && document.visibilityState === 'visible') keepAwake(true);
 });
 
+/* ================= 音频播放列表（可锁屏 / 后台播放） ================= */
+// 把选中单词的录音拼接成一个完整的 MP3，用一个 <audio> 连续播放。
+// 一个连续的音频文件在手机锁屏、切到后台时也能继续播放，还可以下载到手机里用任何播放器听。
+const PL_MODES = [
+  { id: 'learn', title: '📖 讲解模式', desc: '单词读两遍 → 中文释义 → 例句 → 例句翻译。适合第一次学新词。' },
+  { id: 'en2zh', title: '🧠 英→中自测', desc: '单词读两遍 → 停顿，你在心里或小声说出意思 → 公布中文 → 例句。' },
+  { id: 'zh2en', title: '🧠 中→英自测', desc: '先读中文 → 停顿，你说出英文单词 → 公布单词（读两遍）→ 例句。' },
+  { id: 'quick', title: '⚡ 快速过词', desc: '单词 → 中文，节奏快，适合大量复习。' },
+];
+const plAudio = new Audio();
+plAudio.preload = 'auto';
+let PL = null; // 当前播放列表
+
+function plSegments(w) {
+  const P = S.playlist, segs = [];
+  const c = k => segs.push(clipUrl(k, w));
+  const z = ms => segs.push(silUrl(ms));
+  const example = () => {
+    if (!P.example) return;
+    z(1000); c('ex');
+    if (P.exampleZh) { z(600); c('exzh'); }
+  };
+  for (let r = 0; r < P.repeat; r++) {
+    segs.push(silUrl('ding'));
+    if (P.mode === 'learn') { c('en'); z(600); c('en'); z(600); c('zh'); example(); }
+    else if (P.mode === 'en2zh') { c('en'); z(600); c('en'); z(P.think); c('zh'); example(); }
+    else if (P.mode === 'zh2en') { c('zh'); z(P.think); c('en'); z(600); c('en'); example(); }
+    else { c('en'); z(300); c('zh'); }
+    z(1500);
+  }
+  return segs;
+}
+function pickPlaylistWords() {
+  const P = S.playlist;
+  const pool = P.source === 'wrong' ? WORDS.filter(w => prog(w).wb) : scopeWords();
+  const n = P.count || pool.length;
+  if (P.source === 'random' || P.source === 'wrong') return shuffle(pool).slice(0, n);
+  return smartQueue(pool).slice(0, n);
+}
+const fmtSec = t => { t = Math.max(0, Math.floor(t || 0)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; };
+
+async function buildPlaylist() {
+  const words = pickPlaylistWords();
+  if (!words.length) return toast(S.playlist.source === 'wrong' ? '错题本是空的 👍' : '没有可播放的单词');
+  finishPlaylist();
+  // iOS 需要在点击事件里先让 audio 元素播放一次，之后才能自动播放
+  try { plAudio.src = silUrl(300); plAudio.play().catch(() => {}); } catch (e) { /* 忽略 */ }
+  if (VS && VS.running) stopVoice();
+  stopClip();
+  const token = {};
+  const mode = PL_MODES.find(m => m.id === S.playlist.mode);
+  PL = { token, words, building: true, done: 0, total: 0, idx: -1, seen: new Set(), label: `${mode.title.slice(2).trim()} · ${S.playlist.source === 'wrong' ? '错题本' : scopeLabel()}`, mode: S.playlist.mode };
+  render();
+  const lists = words.map(plSegments);
+  const urls = [...new Set(lists.flat())];
+  PL.total = urls.length;
+  const cache = new Map();
+  let next = 0, failed = 0;
+  const worker = async () => {
+    while (next < urls.length && PL && PL.token === token) {
+      const u = urls[next++];
+      try {
+        const r = await fetch(u);
+        if (!r.ok) throw new Error(r.status);
+        cache.set(u, await r.arrayBuffer());
+      } catch (e) { failed++; }
+      if (!PL || PL.token !== token) return;
+      PL.done++;
+      const bar = $('#plBuild');
+      if (bar) { bar.style.width = `${PL.done / PL.total * 100}%`; $('#plBuildTxt').textContent = `${PL.done} / ${PL.total}`; }
+    }
+  };
+  await Promise.all(Array.from({ length: 6 }, worker));
+  if (!PL || PL.token !== token) return; // 已取消
+  if (failed >= urls.length - 1) {
+    PL = null;
+    render();
+    return toast('音频文件加载失败：请确认已联网，或网站已部署录音文件', 4000);
+  }
+  const parts = [], starts = [];
+  let t = 0;
+  lists.forEach(segs => {
+    starts.push(t);
+    segs.forEach(u => {
+      const b = cache.get(u);
+      if (!b) return;
+      parts.push(b);
+      t += b.byteLength / FRAME_BYTES * FRAME_SEC;
+    });
+  });
+  PL.blob = new Blob(parts, { type: 'audio/mpeg' });
+  PL.url = URL.createObjectURL(PL.blob);
+  PL.starts = starts;
+  PL.duration = t;
+  PL.missing = failed;
+  PL.building = false;
+  PL.start = Date.now();
+  plAudio.src = PL.url;
+  plAudio.playbackRate = S.playlist.rate || 1;
+  plAudio.loop = !!S.playlist.loop;
+  setupMediaSession();
+  plAudio.play().catch(() => {});
+  render();
+}
+function finishPlaylist() {
+  if (!PL) return;
+  if (PL.seen && PL.seen.size) {
+    S.history.unshift({ t: Date.now(), kind: 'play', mode: 'play', scope: PL.label, total: PL.seen.size, correct: 0, wrong: [], dur: Date.now() - (PL.start || Date.now()) });
+    S.history = S.history.slice(0, 200);
+    save();
+  }
+  PL.token = null;
+  try { plAudio.pause(); } catch (e) { /* 忽略 */ }
+  if (PL.url) URL.revokeObjectURL(PL.url);
+  PL = null;
+}
+function plIndexAt(t) {
+  const st = PL.starts;
+  let i = 0;
+  while (i + 1 < st.length && st[i + 1] <= t + 0.05) i++;
+  return i;
+}
+function plJump(delta) {
+  if (!PL || !PL.starts) return;
+  let i = plIndexAt(plAudio.currentTime);
+  if (delta < 0 && plAudio.currentTime - PL.starts[i] > 2) delta = 0; // 先回到本词开头
+  i = Math.max(0, Math.min(PL.starts.length - 1, i + delta));
+  plAudio.currentTime = PL.starts[i] + 0.01;
+  if (plAudio.paused) plAudio.play().catch(() => {});
+  plUpdate();
+}
+function plSeekBy(sec) {
+  if (!PL || !PL.starts) return;
+  plAudio.currentTime = Math.max(0, Math.min(PL.duration - 0.1, plAudio.currentTime + sec));
+}
+function setupMediaSession() {
+  if (!('mediaSession' in navigator)) return;
+  const h = (a, f) => { try { navigator.mediaSession.setActionHandler(a, f); } catch (e) { /* 不支持 */ } };
+  h('play', () => plAudio.play());
+  h('pause', () => plAudio.pause());
+  h('previoustrack', () => plJump(-1));
+  h('nexttrack', () => plJump(1));
+  h('seekbackward', () => plSeekBy(-10));
+  h('seekforward', () => plSeekBy(10));
+  h('seekto', d => { plAudio.currentTime = d.seekTime; });
+}
+// 播放进度变化时：更新当前单词、锁屏信息、学习记录
+function plUpdate() {
+  if (!PL || !PL.starts) return;
+  const i = plIndexAt(plAudio.currentTime);
+  const w = PL.words[i];
+  if (i !== PL.idx) {
+    PL.idx = i;
+    if (!PL.seen.has(w.id) && !plAudio.paused) { PL.seen.add(w.id); markSeen(w); }
+    if ('mediaSession' in navigator && window.MediaMetadata) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: `${w.en}  ${w.zh}`,
+        artist: `营养学单词 · ${i + 1}/${PL.words.length}`,
+        album: PL.label,
+        artwork: [{ src: 'icon-512.png', sizes: '512x512', type: 'image/png' }],
+      });
+    }
+    if (currentTab === 'play') {
+      const now = $('#plNow');
+      if (now) now.innerHTML = plNowHtml(w, i);
+      document.querySelectorAll('[data-pl]').forEach(li => li.classList.toggle('now', +li.dataset.pl === i));
+    }
+  }
+  if (currentTab === 'play') {
+    const seek = $('#plSeek');
+    if (seek && !plUpdate.dragging) seek.value = plAudio.currentTime;
+    const ct = $('#plCur');
+    if (ct) ct.textContent = fmtSec(plAudio.currentTime);
+    const pb = $('#plPlay');
+    if (pb) pb.textContent = plAudio.paused ? '▶️' : '⏸';
+  }
+}
+plAudio.addEventListener('timeupdate', plUpdate);
+plAudio.addEventListener('play', plUpdate);
+plAudio.addEventListener('pause', plUpdate);
+plAudio.addEventListener('ended', () => {
+  plUpdate();
+  if (PL && PL.seen.size) toast(`播放完毕，共 ${PL.words.length} 个单词`);
+});
+
+function plNowHtml(w, i) {
+  return `<div class="muted small">第 ${i + 1} / ${PL.words.length} 个 · ${esc(w.group)}</div>
+    <div class="en">${esc(w.en)}</div>
+    <div class="ipa muted">${esc(w.ipa)}</div>
+    <div class="zh">${esc(w.zh)}</div>`;
+}
+
+function renderPlay() {
+  if (PL && PL.building) {
+    $('#view').innerHTML = `<div class="card center"><h2>正在生成播放列表…</h2>
+      <p class="muted small">正在下载 ${PL.words.length} 个单词的录音（下载过的会缓存在手机里，下次更快）</p>
+      <div class="build-bar"><div id="plBuild" style="width:${PL.total ? PL.done / PL.total * 100 : 0}%"></div></div>
+      <p class="muted small" id="plBuildTxt">${PL.done} / ${PL.total || '…'}</p>
+      <button class="btn ghost" id="plCancel">取消</button></div>`;
+    $('#plCancel').onclick = () => { finishPlaylist(); render(); };
+    return;
+  }
+  if (PL && PL.url) {
+    const i = Math.max(0, plIndexAt(plAudio.currentTime));
+    const rates = [0.8, 1, 1.2, 1.5];
+    $('#view').innerHTML = `<div class="card pl-now"><div id="plNow">${plNowHtml(PL.words[i], i)}</div>
+        <input type="range" class="pl-seek" id="plSeek" min="0" max="${PL.duration.toFixed(1)}" step="0.1" value="${plAudio.currentTime}">
+        <div class="pl-time"><span id="plCur">${fmtSec(plAudio.currentTime)}</span><span>${fmtSec(PL.duration)}</span></div>
+        <div class="pl-controls">
+          <button class="btn secondary" id="plPrev" aria-label="上一个词">⏮</button>
+          <button class="btn secondary" id="plBack" aria-label="后退10秒" style="font-size:14px">-10s</button>
+          <button class="btn" id="plPlay" aria-label="播放/暂停">${plAudio.paused ? '▶️' : '⏸'}</button>
+          <button class="btn secondary" id="plFwd" aria-label="前进10秒" style="font-size:14px">+10s</button>
+          <button class="btn secondary" id="plNext" aria-label="下一个词">⏭</button>
+        </div>
+        <div class="row spread" style="margin-top:12px">
+          <div class="seg">${rates.map(r => `<button data-rate="${r}" class="${(S.playlist.rate || 1) === r ? 'on' : ''}">${r}×</button>`).join('')}</div>
+          <label class="row small">循环 <input type="checkbox" class="switch" id="plLoop" ${S.playlist.loop ? 'checked' : ''}></label>
+        </div>
+      </div>
+      ${PL.missing ? `<div class="notice">有 ${PL.missing} 段录音没有加载成功，已跳过。</div>` : ''}
+      <div class="row wrap" style="margin-bottom:12px">
+        <button class="btn secondary grow" id="plSave">⬇️ 保存 MP3</button>
+        <button class="btn ghost grow" id="plNew">🔄 新建列表</button>
+      </div>
+      <p class="muted small">🔒 这是一个完整的音频文件，锁屏或切到其他 App 时也会继续播放，锁屏界面可以切换上 / 下一个词。保存 MP3 后，也可以在“文件”或任何音乐播放器里离线听。</p>
+      <div class="card"><h2>本列表单词（${PL.words.length}）</h2><ul class="word-list" id="plList">
+        ${PL.words.map((w, k) => `<li data-pl="${k}" class="${k === i ? 'now' : ''}"><span class="dot ${status(w)}"></span>
+          <div class="grow"><div class="w">${esc(w.en)}</div><div class="m">${esc(w.zh)}</div></div><span class="muted small">${fmtSec(PL.starts[k])}</span></li>`).join('')}
+      </ul></div>`;
+    $('#plPlay').onclick = () => { plAudio.paused ? plAudio.play().catch(() => toast('请再点一次播放')) : plAudio.pause(); };
+    $('#plPrev').onclick = () => plJump(-1);
+    $('#plNext').onclick = () => plJump(1);
+    $('#plBack').onclick = () => plSeekBy(-10);
+    $('#plFwd').onclick = () => plSeekBy(10);
+    const seek = $('#plSeek');
+    seek.addEventListener('input', () => { plUpdate.dragging = true; $('#plCur').textContent = fmtSec(+seek.value); });
+    seek.addEventListener('change', () => { plUpdate.dragging = false; plAudio.currentTime = +seek.value; });
+    document.querySelectorAll('[data-rate]').forEach(b => b.onclick = () => {
+      S.playlist.rate = +b.dataset.rate; save(); plAudio.playbackRate = S.playlist.rate; render();
+    });
+    $('#plLoop').onchange = e => { S.playlist.loop = e.target.checked; plAudio.loop = e.target.checked; save(); };
+    $('#plList').onclick = e => {
+      const li = e.target.closest('[data-pl]');
+      if (!li) return;
+      plAudio.currentTime = PL.starts[+li.dataset.pl] + 0.01;
+      plAudio.play().catch(() => {});
+    };
+    $('#plSave').onclick = savePlaylist;
+    $('#plNew').onclick = () => { finishPlaylist(); render(); };
+    return;
+  }
+  const P = S.playlist;
+  const seg = (key, opts) => `<div class="seg">${opts.map(([val, label]) => `<button data-p="${key}" data-val="${val}" class="${String(P[key]) === String(val) ? 'on' : ''}">${label}</button>`).join('')}</div>`;
+  const tog = key => `<input type="checkbox" class="switch" data-pt="${key}" ${P[key] ? 'checked' : ''}>`;
+  const wbCount = WORDS.filter(w => prog(w).wb).length;
+  const est = Math.round((P.count || scopeWords().length) * ({ learn: 14, en2zh: 13, zh2en: 13, quick: 4 }[P.mode] + (P.example && P.mode !== 'quick' ? 0 : -8)) * P.repeat / 60);
+  $('#view').innerHTML = scopeBar() + `<div class="card"><h2>播放模式</h2><div class="mode-list">
+      ${PL_MODES.map(m => `<button class="mode ${m.id === P.mode ? 'on' : ''}" data-pmode="${m.id}"><b>${m.title}</b><span>${m.desc}</span></button>`).join('')}
+    </div></div>
+    <div class="card"><h2>设置</h2>
+      <div class="opt-row"><span>单词来源</span>${seg('source', [['smart', '智能'], ['random', '随机'], ['wrong', `错题本(${wbCount})`]])}</div>
+      <div class="opt-row"><span>单词数量</span>${seg('count', [[20, '20'], [50, '50'], [100, '100'], [200, '200']])}</div>
+      <div class="opt-row"><span>每词重复</span>${seg('repeat', [[1, '1遍'], [2, '2遍']])}</div>
+      ${P.mode === 'en2zh' || P.mode === 'zh2en' ? `<div class="opt-row"><span>思考时间</span>${seg('think', [[2000, '2秒'], [3000, '3秒'], [5000, '5秒'], [8000, '8秒']])}</div>` : ''}
+      ${P.mode !== 'quick' ? `<div class="opt-row"><span>播放例句</span>${tog('example')}</div>
+      <div class="opt-row"><span>例句后读中文翻译</span>${tog('exampleZh')}</div>` : ''}
+    </div>
+    <button class="btn block big" id="plStart">🎵 生成并播放（约 ${Math.max(1, est)} 分钟）</button>
+    <p class="muted small" style="margin-top:12px">💡 “智能”会按“待复习 → 新词（同组的词连在一起）→ 不熟的词”的顺序选词。<br>
+    💡 生成的是一整段 MP3：锁屏、切换 App 都能继续听，也可以保存到手机离线播放。英文为美式发音。</p>`;
+  document.querySelectorAll('[data-pmode]').forEach(b => b.onclick = () => { P.mode = b.dataset.pmode; save(); render(); });
+  document.querySelectorAll('[data-p]').forEach(b => b.onclick = () => {
+    const val = b.dataset.val;
+    P[b.dataset.p] = /^\d+$/.test(val) ? +val : val;
+    save(); render();
+  });
+  document.querySelectorAll('[data-pt]').forEach(b => b.onchange = () => { P[b.dataset.pt] = b.checked; save(); render(); });
+  $('#plStart').onclick = buildPlaylist;
+}
+async function savePlaylist() {
+  if (!PL || !PL.blob) return;
+  const name = `营养学单词-${PL.words.length}词-${todayKey()}.mp3`;
+  const file = new File([PL.blob], name, { type: 'audio/mpeg' });
+  // 手机上优先用系统分享面板（可“存储到文件”或发送到其他 App）
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: name }); return; } catch (e) { if (e && e.name === 'AbortError') return; }
+  }
+  const a = document.createElement('a');
+  a.href = PL.url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 /* ================= 测试 ================= */
 const QTYPES = {
   en2zh: '看英文选释义',
@@ -980,9 +1358,9 @@ function renderQuestion() {
     <div class="card">${body}${opts}<div id="fb"></div></div>
     <div class="row"><button class="btn ghost" id="qQuit">退出</button><span class="grow"></span><button class="btn hidden" id="qNext">下一题 →</button></div>`;
   s.answered = false;
-  if (q.type === 'listen') { $('#qPlay').onclick = () => speakNow(w.en, EN()); speakNow(w.en, EN()); }
+  if (q.type === 'listen') { $('#qPlay').onclick = () => sayClip(w, 'en'); sayClip(w, 'en'); }
   if (q.type === 'spell') {
-    $('#qPlay').onclick = () => speakNow(w.en, EN());
+    $('#qPlay').onclick = () => sayClip(w, 'en');
     const submit = () => {
       if (s.answered) return;
       const val = $('#spellIn').value;
@@ -1031,7 +1409,7 @@ function answer(ok, typed) {
     <div class="small" style="margin-top:6px">${highlight(w.ex, w.en)}<br><span class="muted">${esc(w.exZh)}</span></div>
   </div>`;
   $('#qNext').classList.remove('hidden');
-  if (S.settings.autoSpeak) speakNow(w.en, EN());
+  if (S.settings.autoSpeak) sayClip(w, 'en');
 }
 function finishQuiz() {
   const s = quizSess;
@@ -1086,7 +1464,7 @@ function renderStats() {
     days.push({ label: k.slice(5).replace('-', '/'), v: (d.reviewed || 0) + (d.listened || 0) });
   }
   const maxV = Math.max(1, ...days.map(d => d.v));
-  const modeName = { quiz: '📝 测试', listen: '🎧 纯听', repeat: '🗣️ 跟读', en2zh: '💬 英译中', zh2en: '💬 中译英' };
+  const modeName = { quiz: '📝 测试', play: '🎵 播放列表', listen: '🎧 纯听', repeat: '🗣️ 跟读', en2zh: '💬 英译中', zh2en: '💬 中译英' };
   $('#view').innerHTML = `<div class="stat-grid">
       <div class="stat"><div class="num">${seen}</div><div class="lbl">已学单词 / ${WORDS.length}</div></div>
       <div class="stat"><div class="num" style="color:var(--primary)">${mastered}</div><div class="lbl">已掌握</div></div>
@@ -1112,7 +1490,7 @@ function renderStats() {
     </div>
     <div class="card"><h2>历史记录</h2>
       ${S.history.length ? `<ul class="word-list">${S.history.slice(0, 30).map(h => `<li><div class="grow"><div class="w">${modeName[h.mode] || h.mode} <span class="muted small">${fmtTime(h.t)}</span></div><div class="m">${esc(h.scope)}</div></div>
-        <div>${h.mode === 'listen' ? `${h.total} 词` : `<b>${h.correct}</b>/${h.total}`}</div></li>`).join('')}</ul>` : '<p class="muted">还没有记录，去学习或测试吧。</p>'}
+        <div>${h.mode === 'listen' || h.mode === 'play' ? `${h.total} 词` : `<b>${h.correct}</b>/${h.total}`}</div></li>`).join('')}</ul>` : '<p class="muted">还没有记录，去学习或测试吧。</p>'}
     </div>
     <div class="card"><h2>数据管理</h2>
       <p class="muted small">学习记录只保存在这台手机的浏览器里。换手机或清理浏览器数据前，请先导出备份。</p>
@@ -1161,28 +1539,31 @@ function renderStats() {
 function openSettings() {
   loadVoices();
   const st = S.settings;
-  const enVoices = voices.filter(v => v.lang.replace('_', '-').startsWith('en'));
+  const enVoices = voices.filter(v => v.lang.replace('_', '-') === 'en-US');
   const zhVoices = voices.filter(v => /^(zh|cmn)/i.test(v.lang));
   openModal(`<h2>设置</h2>
-    <label class="field">英语口音</label>
-    <div class="seg"><button data-acc="en-US" class="${st.accent === 'en-US' ? 'on' : ''}">美式</button><button data-acc="en-GB" class="${st.accent === 'en-GB' ? 'on' : ''}">英式</button></div>
-    <label class="field">英文语音</label>
+    <div class="opt-row"><span>使用高质量录音（美式英语 + 普通话）</span><input type="checkbox" class="switch" id="useClips" ${st.useClips ? 'checked' : ''}></div>
+    <label class="field">录音播放速度：<span id="clipRateV">${st.clipRate.toFixed(2)}</span>×</label>
+    <input type="range" class="full" id="clipRate" min="0.7" max="1.4" step="0.05" value="${st.clipRate}">
+    <p class="muted small">录音不可用（例如没联网且没缓存）时，会自动改用手机自带的语音。下面是手机语音的设置：</p>
+    <label class="field">手机英文语音（美式）</label>
     <select class="full" id="enV"><option value="">自动选择</option>${enVoices.map(v => `<option value="${esc(v.voiceURI)}" ${v.voiceURI === st.enVoice ? 'selected' : ''}>${esc(v.name)} (${esc(v.lang)})</option>`).join('')}</select>
     <label class="field">中文语音</label>
     <select class="full" id="zhV"><option value="">自动选择</option>${zhVoices.map(v => `<option value="${esc(v.voiceURI)}" ${v.voiceURI === st.zhVoice ? 'selected' : ''}>${esc(v.name)} (${esc(v.lang)})</option>`).join('')}</select>
-    <label class="field">语速：<span id="rateV">${st.rate.toFixed(2)}</span></label>
+    <label class="field">手机语音语速：<span id="rateV">${st.rate.toFixed(2)}</span></label>
     <input type="range" class="full" id="rate" min="0.5" max="1.3" step="0.05" value="${st.rate}">
     <div class="row" style="margin-top:8px"><button class="speak-btn" id="tEn">🔊 试听英文</button><button class="speak-btn" id="tZh">🔊 试听中文</button></div>
     <div class="opt-row" style="margin-top:8px"><span>学习/测试时自动朗读单词</span><input type="checkbox" class="switch" id="autoSp" ${st.autoSpeak ? 'checked' : ''}></div>
-    <p class="muted small">提示：如果声音不自然，iPhone 可在「设置 → 辅助功能 → 朗读内容 → 声音」下载更高质量的英文/中文语音；安卓可在系统「文字转语音」设置中安装 Google 语音包。</p>
+    <p class="muted small">提示：手机语音如果不自然，iPhone 可在「设置 → 辅助功能 → 朗读内容 → 声音 → 英语（美国）」下载 Samantha / Ava 等高质量语音；安卓可在系统「文字转语音」中安装 Google 语音包。</p>
     <p class="muted small">词库共 ${WORDS.length} 词 · 语音识别：${hasSR ? '支持 ✅' : '不支持 ❌'} · 语音播报：${hasTTS ? '支持 ✅' : '不支持 ❌'}</p>
     <button class="btn block" data-close>完成</button>`);
-  document.querySelectorAll('[data-acc]').forEach(b => b.onclick = () => { st.accent = b.dataset.acc; st.enVoice = ''; save(); openSettings(); });
+  $('#useClips').onchange = e => { st.useClips = e.target.checked; save(); };
+  $('#clipRate').oninput = e => { st.clipRate = +e.target.value; $('#clipRateV').textContent = st.clipRate.toFixed(2); save(); };
   $('#enV').onchange = e => { st.enVoice = e.target.value; save(); };
   $('#zhV').onchange = e => { st.zhVoice = e.target.value; save(); };
   $('#rate').oninput = e => { st.rate = +e.target.value; $('#rateV').textContent = st.rate.toFixed(2); save(); };
-  $('#tEn').onclick = () => speakNow('Carbohydrates are the body\'s main source of energy.', EN());
-  $('#tZh').onclick = () => speakNow('碳水化合物是身体的主要能量来源。', ZH);
+  $('#tEn').onclick = () => sayClip(WORD_BY_ID['carbohydrate'], 'ex');
+  $('#tZh').onclick = () => sayClip(WORD_BY_ID['carbohydrate'], 'exzh');
   $('#autoSp').onchange = e => { st.autoSpeak = e.target.checked; save(); };
 }
 $('#settingsBtn').onclick = openSettings;

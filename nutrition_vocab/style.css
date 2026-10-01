@@ -226,3 +226,29 @@ mark { background: none; color: var(--accent); font-weight: 700; }
 }
 label.field { display: block; margin: 10px 0 4px; font-size: 14px; color: var(--muted); }
 select.full, input.full { width: 100%; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); }
+
+/* 同组提示与同组词 */
+.group-hint { text-align: left; margin-top: 12px; }
+.group-hint .tip { background: var(--primary-soft); color: var(--text); border-radius: 10px; padding: 10px 12px; font-size: 13px; line-height: 1.6; }
+.group-hint .sibs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; align-items: center; }
+.chip.sib { font-size: 13px; padding: 4px 10px; }
+.chip.sib.mastered { border-color: var(--primary); }
+.chip.sib.learning { border-color: var(--accent); }
+.word-list li.group-head { display: block; background: var(--bg); margin: 8px -16px 0; padding: 10px 16px; border-bottom: none; }
+.word-list li.group-head:first-child { margin-top: -16px; border-radius: 14px 14px 0 0; }
+.tabbar button { font-size: 11px; }
+
+/* 播放列表 */
+.pl-now { text-align: center; padding: 20px 16px; }
+.pl-now .en { font-size: 28px; font-weight: 700; word-break: break-word; }
+.pl-now .zh { font-size: 18px; margin-top: 4px; }
+.pl-seek { width: 100%; margin: 12px 0 4px; accent-color: var(--primary); }
+.pl-time { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+.pl-controls { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 12px; }
+.pl-controls .btn { padding: 12px 0; font-size: 18px; }
+.word-list li.now { background: var(--primary-soft); margin: 0 -16px; padding-left: 16px; padding-right: 16px; }
+.build-bar { height: 10px; background: var(--line); border-radius: 99px; overflow: hidden; margin-top: 10px; }
+.build-bar > div { height: 100%; background: var(--primary); transition: width .2s; }
+.cat-toggle { background: none; border: none; padding: 4px 0; text-align: left; font-weight: 600; flex: 1; }
+.cat-toggle .muted { font-weight: 400; display: block; margin-left: 18px; }
+.cat-block .cat-head { gap: 8px; }
