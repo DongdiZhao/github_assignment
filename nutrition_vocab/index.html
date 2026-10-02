@@ -36,6 +36,20 @@
   </div>
   <div id="toast" class="toast hidden"></div>
 
+  <script>
+    // 出错时在页面顶部显示错误信息，方便截图反馈
+    (function () {
+      var shown = 0;
+      function show(msg) {
+        if (shown++ > 3) return;
+        var b = document.getElementById('errBanner');
+        if (!b) { b = document.createElement('div'); b.id = 'errBanner'; b.onclick = function () { b.remove(); }; document.body.appendChild(b); }
+        b.textContent += (b.textContent ? '\n' : '⚠️ 出错了（请截图发给开发者，点此关闭）：\n') + msg;
+      }
+      window.addEventListener('error', function (e) { show((e.message || '资源加载失败') + (e.filename ? ' @ ' + e.filename.split('/').pop() + ':' + e.lineno : '')); });
+      window.addEventListener('unhandledrejection', function (e) { var r = e.reason; if (r && (r.name === 'NotAllowedError' || r.name === 'AbortError')) return; show('Promise: ' + (r && r.message || r)); });
+    })();
+  </script>
   <script src="words.js"></script>
   <script src="vocab/1-biochem.js"></script>
   <script src="vocab/2-anatomy.js"></script>

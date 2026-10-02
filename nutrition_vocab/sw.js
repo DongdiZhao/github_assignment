@@ -1,7 +1,7 @@
 // 离线缓存：首次打开后，没有网络也能使用。
 // 程序文件：优先联网获取最新版本，断网时用缓存。
 // 录音文件（audio/）：播放过一次就缓存下来，之后优先用缓存，离线也能听。
-const CACHE = 'nutrition-vocab-v2';
+const CACHE = 'nutrition-vocab-v3';
 const AUDIO_CACHE = 'nutrition-vocab-audio-v1';
 const FILES = [
   './', './index.html', './style.css', './app.js', './words.js',
