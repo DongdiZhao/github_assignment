@@ -252,3 +252,8 @@ select.full, input.full { width: 100%; padding: 10px; border-radius: 10px; borde
 .cat-toggle { background: none; border: none; padding: 4px 0; text-align: left; font-weight: 600; flex: 1; }
 .cat-toggle .muted { font-weight: 400; display: block; margin-left: 18px; }
 .cat-block .cat-head { gap: 8px; }
+
+/* iPhone Safari：只有被标记为可点击的元素，点击事件才会冒泡到页面级监听器 */
+html { touch-action: manipulation; }
+button, label, [data-word], [data-pl], [data-say], [data-act], [data-open], .option, .mode, .chip { cursor: pointer; }
+#errBanner { position: fixed; top: 0; left: 0; right: 0; z-index: 100; background: #c53030; color: #fff; font-size: 13px; padding: calc(8px + env(safe-area-inset-top)) 12px 8px; white-space: pre-wrap; word-break: break-word; }
